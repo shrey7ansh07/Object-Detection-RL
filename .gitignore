@@ -1,0 +1,8 @@
+images
+labels
+*.jpg
+*.mp4
+*.log
+*.pth
+*.txt
+*.jpeg
