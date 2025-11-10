@@ -545,6 +545,9 @@ class DQNInference:
         show_confidence: bool
     ) -> list:
         """Generate all frames for the video."""
+        import matplotlib
+        matplotlib.use('Agg')  # Use non-interactive backend
+        
         frames = []
         fig, ax = plt.subplots(1, figsize=(10, 10))
         
@@ -563,11 +566,13 @@ class DQNInference:
         )
         ax.add_patch(rect)
         
-        # Convert to numpy array
+        # Convert to numpy array using buffer_rgba
         fig.canvas.draw()
-        frame = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
-        frame = frame.reshape(fig.canvas.get_width_height()[::-1] + (3,))
-        frames.append(frame)
+        buf = fig.canvas.buffer_rgba()
+        frame = np.asarray(buf)
+        # Convert RGBA to RGB
+        frame = frame[:, :, :3]
+        frames.append(frame.copy())
         
         # Frames for each step
         for i, step_data in enumerate(history):
@@ -601,9 +606,10 @@ class DQNInference:
             ax.axis('off')
             
             fig.canvas.draw()
-            frame = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
-            frame = frame.reshape(fig.canvas.get_width_height()[::-1] + (3,))
-            frames.append(frame)
+            buf = fig.canvas.buffer_rgba()
+            frame = np.asarray(buf)
+            frame = frame[:, :, :3]
+            frames.append(frame.copy())
         
         # Final frame
         ax.clear()
@@ -622,9 +628,10 @@ class DQNInference:
         ax.axis('off')
         
         fig.canvas.draw()
-        frame = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
-        frame = frame.reshape(fig.canvas.get_width_height()[::-1] + (3,))
-        frames.append(frame)
+        buf = fig.canvas.buffer_rgba()
+        frame = np.asarray(buf)
+        frame = frame[:, :, :3]
+        frames.append(frame.copy())
         
         plt.close(fig)
         return frames
@@ -780,11 +787,11 @@ class DQNInference:
 
 def main():
     parser = argparse.ArgumentParser(description='DQN Object Detection Inference')
-    parser.add_argument('--checkpoint', type=str,default='checkpoints_vit128/dqn_checkpoint_epoch_3.pth',
+    parser.add_argument('--checkpoint', type=str,default='checkpoints_ddqn\ddqn_checkpoint_epoch_5.pth',
                         help='Path to trained model checkpoint')
-    parser.add_argument('--image', type=str,default='/home/guest/GB_DATASET/GBCU_1255/Group2/Object-Detection-RL/dataset/images/train/im00008.jpg',
+    parser.add_argument('--image', type=str,default='dataset/images/train/im00008.jpg',
                         help='Path to input image')
-    parser.add_argument('--max_steps', type=int, default=15,
+    parser.add_argument('--max_steps', type=int, default=20,
                         help='Maximum detection steps')
     parser.add_argument('--initial_box', type=str, default='center',
                         choices=['center', 'random'],
@@ -846,14 +853,6 @@ def main():
 
 
 if __name__ == '__main__':
-    # Example usage if running without arguments (for testing)
-    import sys
-    # if len(sys.argv) == 1:
-    #     print("Example usage:")
-    #     print("python inference.py --checkpoint checkpoints_vit128/dqn_checkpoint_epoch_5.pth --image test_image.jpg")
-    #     print("\nWith ground truth and video:")
-    #     print("python inference.py --checkpoint checkpoints_vit128/dqn_checkpoint_epoch_5.pth --image test_image.jpg --ground_truth '100,100,300,300' --save_viz result.jpg")
-    #     print("\nWithout video:")
-    #     print("python inference.py --checkpoint checkpoints_vit128/dqn_checkpoint_epoch_5.pth --image test_image.jpg --no_video")
     
+    import sys    
     main()
