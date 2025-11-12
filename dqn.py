@@ -426,7 +426,7 @@ def main():
     
     # Training
     try:
-        trainer.train(start_epoch,num_epochs=int(args.num_epochs) - int(start_epoch), warmup_steps=args.warmup_steps)
+        trainer.train(start_epoch,num_epochs=int(args.num_epochs), warmup_steps=args.warmup_steps)
         trainer.log("\n" + "="*70)
         trainer.log("TRAINING COMPLETED SUCCESSFULLY!")
         trainer.log("="*70)
