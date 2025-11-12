@@ -24,7 +24,7 @@ import torchvision.transforms as T # NEW IMPORT for standard ViT transforms
 from visual_feature_extractor import VisualFeatureExtractor
 from enviornment import DQNObjectDetectionEnv
 from ddqnagent import DoubleDQNAgent
-from components import DQNetwork, Transition, ReplayBuffer
+from components import DQNetwork, Transition, ReplayBuffer, ObjectDetectionDataset
 
 
 
@@ -34,80 +34,6 @@ VIT_BASE_DIM = 768
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 torch.set_default_device(device)
-
-
-class ObjectDetectionDataset:
-    """
-    Handles loading data formatted in the COCO style (list of images, list of annotations).
-    """
-    def __init__(self, image_dir: str, annotations_path: str):
-        self.image_dir = Path(image_dir)
-        
-        with open(annotations_path, 'r') as f:
-            full_data = json.load(f)
-
-        # 1. Create a dictionary to map image_id to its metadata (width, height, file_name)
-        image_metadata = {img['id']: img for img in full_data.get('images', [])}
-        
-        # 2. Create the final map linking file_name to its bounding box and size
-        self.data_map: Dict[str, Any] = {}
-        
-        annotations_list = full_data.get('annotations', [])
-        self.image_cache = {}
-
-        
-        # COCO allows multiple annotations per image. We assume one for simplicity.
-        # If there are multiple, this will only take the last one processed for a given image_id.
-        for ann in annotations_list:
-            image_id = ann['image_id']
-            if image_id in image_metadata:
-                metadata = image_metadata[image_id]
-                file_name = metadata['file_name']
-                
-                # Check if the image file actually exists
-                if (self.image_dir / file_name).exists():
-                    self.data_map[file_name] = {
-                        'bbox': ann['bbox'],  # [x, y, width, height] in COCO
-                        'width': metadata['width'],
-                        'height': metadata['height']
-                    }
-        
-        self.image_file_names = list(self.data_map.keys())
-        
-        if not self.image_file_names:
-             raise ValueError("No valid image files found after processing annotations.")
-
-    def __len__(self):
-        return len(self.image_file_names)
-
-    def __getitem__(self, idx: int) -> Tuple[np.ndarray, Tuple[float, float, float, float]]:
-        
-
-        image_file_name = self.image_file_names[idx]
-        data = self.data_map[image_file_name]
-        if image_file_name not in self.image_cache:
-            image_path = self.image_dir / image_file_name
-            image = Image.open(image_path).convert('RGB')
-            self.image_cache[image_file_name] = np.array(image)
-        image_np = self.image_cache[image_file_name]
-        # Load image
-        # image_path = self.image_dir / image_file_name
-        # image = Image.open(image_path).convert('RGB')
-        # image_np = np.array(image)
-        
-        bbox_coco = data['bbox']
-        
-        x, y, x1, y1 = bbox_coco
-        
-        # Convert to [x_min, y_min, x_max, y_max] format (used by your DQN Env)
-        ground_truth_box = (
-            float(x), 
-            float(y), 
-            float(x1), 
-            float(y1)
-        )
-        
-        return image_np, ground_truth_box
 
 # ============================================================================
 # IMPROVED TRAINER WITH BETTER LOGGING

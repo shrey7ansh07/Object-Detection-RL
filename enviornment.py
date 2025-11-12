@@ -49,7 +49,9 @@ class DQNObjectDetectionEnv:
         max_steps: int = 20,
         move_percentage: float = 0.1,
         initial_box: str = "center",
-        device: torch.device = torch.device('cpu')
+        device: torch.device = torch.device('cpu'),
+        cached_feature_map: torch.Tensor = None,
+        resize_info: Dict = None,
     ):
         self.image = image
         self.ground_truth_box = np.array(ground_truth_box, dtype=np.float32)
@@ -73,6 +75,9 @@ class DQNObjectDetectionEnv:
             T.ToTensor(),
             T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
+
+        self.cached_feature_map = cached_feature_map
+        self.resize_info = resize_info
 
     def reset(self) -> np.ndarray:
         self.step_count = 0
@@ -109,7 +114,12 @@ class DQNObjectDetectionEnv:
 
         # Precompute ViT feature map once per image
         img_pil = Image.fromarray(self.image)
-        self.feature_map, self.resize_info = self.feature_extractor.forward_feature_map(img_pil)
+        # self.feature_map, self.resize_info = self.feature_extractor.forward_feature_map(img_pil)
+        if self.cached_feature_map is not None:
+            self.feature_map = self.cached_feature_map
+        else:
+            self.feature_map, self.resize_info = self.feature_extractor.forward_feature_map(img_pil)
+
         return self._get_state()
     
     def step(self, action: int) -> Tuple[np.ndarray, float, bool, Dict]:
@@ -348,3 +358,189 @@ class DQNObjectDetectionEnv:
             return 0.0
         
         return float(intersection / union)
+    
+
+
+
+
+# ============================================================================
+# CONTINUOUS ACTION ENVIRONMENT WRAPPER
+# ============================================================================
+
+class ContinuousActionWrapper:
+    """
+    Wrapper to convert continuous TD3 actions to box adjustments
+    
+    Continuous actions: [dx, dy, dw, dh] in range [-1, 1]
+    Maps to: relative changes in box position and size
+    """
+    
+    def __init__(self, base_env, action_scale=0.1):
+        """
+        Args:
+            base_env: Your existing environment
+            action_scale: How much to scale actions (0.1 = 10% max change)
+        """
+        self.env = base_env
+        self.action_scale = action_scale
+    
+    def reset(self):
+        return self.env.reset()
+    
+    def step(self, continuous_action):
+        """
+        Convert continuous action to box changes
+        
+        Args:
+            continuous_action: [dx, dy, dw, dh] each in [-1, 1]
+        
+        Returns:
+            next_state, reward, done, info
+        """
+        # Get current box
+        x_min, y_min, x_max, y_max = self.env.current_box
+        width = x_max - x_min
+        height = y_max - y_min
+        center_x = (x_min + x_max) / 2
+        center_y = (y_min + y_max) / 2
+        
+        # Apply continuous actions (scaled)
+        dx, dy, dw, dh = continuous_action * self.action_scale
+        
+        # Update box
+        center_x += dx * width
+        center_y += dy * height
+        width *= (1 + dw)
+        height *= (1 + dh)
+        
+        # Reconstruct box
+        next_box = np.array([
+            center_x - width / 2,
+            center_y - height / 2,
+            center_x + width / 2,
+            center_y + height / 2
+        ], dtype=np.float32)
+        
+        # Clip to image boundaries
+        next_box = self.env._clip_box(next_box)
+        
+        # Calculate IoU
+        current_iou = self.env._calculate_iou(next_box, self.env.ground_truth_box)
+        
+        # Calculate reward with area penalty
+        reward = self._calculate_reward_with_area_penalty(
+            current_iou, 
+            next_box, 
+            self.env.ground_truth_box,
+            self.env.previous_iou
+        )
+        
+        # Update environment state
+        self.env.current_box = next_box
+        self.env.previous_iou = current_iou
+        self.env.step_count += 1
+        
+        # Check if done
+        done = self._check_done(current_iou)
+        
+        # Get next state
+        next_state = self.env._get_state()
+        
+        info = {'iou': current_iou, 'step': self.env.step_count}
+        
+        return next_state, reward, done, info
+    
+    def _calculate_reward_with_area_penalty(
+        self, 
+        current_iou, 
+        pred_box, 
+        gt_box, 
+        previous_iou
+    ):
+        """
+        Improved reward with penalty for excessive area outside GT
+        
+        This prevents the box from growing too large to maximize IoU
+        """
+        # Base reward: IoU improvement
+        iou_delta = current_iou - previous_iou
+        
+        if iou_delta > 0.01:
+            reward = 10.0 * iou_delta
+        elif iou_delta < -0.01:
+            reward = -10.0 * abs(iou_delta)
+        else:
+            reward = -0.5
+        
+        # Progressive IoU bonuses
+        if current_iou > 0.8:
+            reward += 10.0
+        elif current_iou > 0.7:
+            reward += 5.0
+        elif current_iou > 0.6:
+            reward += 2.0
+        
+        # AREA PENALTY: Penalize excessive area outside ground truth
+        pred_area = (pred_box[2] - pred_box[0]) * (pred_box[3] - pred_box[1])
+        gt_area = (gt_box[2] - gt_box[0]) * (gt_box[3] - gt_box[1])
+        
+        # Calculate area outside GT (predicted area - intersection)
+        x_min_inter = max(pred_box[0], gt_box[0])
+        y_min_inter = max(pred_box[1], gt_box[1])
+        x_max_inter = min(pred_box[2], gt_box[2])
+        y_max_inter = min(pred_box[3], gt_box[3])
+        
+        inter_width = max(0, x_max_inter - x_min_inter)
+        inter_height = max(0, y_max_inter - y_min_inter)
+        intersection = inter_width * inter_height
+        
+        outside_area = pred_area - intersection
+        
+        # Penalty proportional to wasted area
+        if pred_area > 0:
+            area_waste_ratio = outside_area / gt_area
+            
+            # Strong penalty if predicted box is much larger than GT
+            if area_waste_ratio > 0.5:  # More than 50% waste
+                reward -= 5.0 * area_waste_ratio
+            elif area_waste_ratio > 0.3:  # 30-50% waste
+                reward -= 2.0 * area_waste_ratio
+            elif area_waste_ratio > 0.1:  # 10-30% waste
+                reward -= 1.0 * area_waste_ratio
+        
+        # Bonus for compact, accurate boxes
+        if current_iou > 0.7 and outside_area / gt_area < 0.2:
+            reward += 3.0  # Bonus for tight, accurate box
+        
+        return reward
+    
+    def _check_done(self, current_iou):
+        """Check if episode should terminate"""
+        if self.env.step_count >= self.env.max_steps:
+            return True
+        if current_iou > 0.85:
+            return True
+        
+        # Early stopping if stuck
+        if hasattr(self.env, 'iou_history') and len(self.env.iou_history) >= 6:
+            recent_ious = self.env.iou_history[-6:]
+            if max(recent_ious) - min(recent_ious) < 0.01 and current_iou > 0.5:
+                return True
+        
+        return False
+    
+    @property
+    def img_height(self):
+        return self.env.img_height
+    
+    @property
+    def img_width(self):
+        return self.env.img_width
+    
+    @property
+    def current_box(self):
+        return self.env.current_box
+    
+    @property
+    def ground_truth_box(self):
+        return self.env.ground_truth_box
